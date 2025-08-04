@@ -1,6 +1,8 @@
 (define-constant contract-owner tx-sender)
 (define-constant visa-fee u100000000)
+(define-constant renewal-fee u50000000)
 (define-constant processing-time u144)
+(define-constant renewal-window u1440)
 
 (define-data-var admin principal tx-sender)
 
@@ -14,6 +16,7 @@
         photo-hash: (buff 32),
         destination: (string-ascii 2),
         purpose: (string-ascii 50),
+        renewals: uint,
     }
 )
 
@@ -61,6 +64,7 @@
             photo-hash: photo-hash,
             destination: destination,
             purpose: purpose,
+            renewals: u0,
         })
         (ok true)
     )
@@ -140,5 +144,42 @@
         (asserts! (is-some (get-visa-status tx-sender)) (err u11))
         (map-delete VisaApplications tx-sender)
         (ok true)
+    )
+)
+
+(define-read-only (check-renewal-eligibility (applicant principal))
+    (match (map-get? VisaApplications applicant)
+        visa-data (let (
+                (current-time burn-block-height)
+                (visa-expiry (get expiry visa-data))
+                (visa-status (get status visa-data))
+            )
+            (and
+                (is-eq visa-status "APPROVED")
+                (>= (- visa-expiry current-time) renewal-window)
+                (<= (get renewals visa-data) u2)
+            )
+        )
+        false
+    )
+)
+
+(define-public (renew-visa)
+    (let ((current-time burn-block-height))
+        (asserts! (not (check-blacklist tx-sender)) (err u12))
+        (asserts! (check-renewal-eligibility tx-sender) (err u13))
+        (try! (stx-transfer? renewal-fee tx-sender contract-owner))
+        (match (map-get? VisaApplications tx-sender)
+            visa-data (begin
+                (map-set VisaApplications tx-sender
+                    (merge visa-data {
+                        expiry: (+ (get expiry visa-data) u5200),
+                        renewals: (+ (get renewals visa-data) u1),
+                    })
+                )
+                (ok true)
+            )
+            (err u14)
+        )
     )
 )
