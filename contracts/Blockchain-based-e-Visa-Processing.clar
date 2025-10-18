@@ -7,8 +7,14 @@
 (define-constant extension-fee-business u150000000)
 (define-constant extension-fee-medical u100000000)
 (define-constant max-extension-days u720)
+(define-constant refund-rate-early u80)
+(define-constant refund-rate-standard u50)
+(define-constant refund-rate-late u20)
+(define-constant early-rejection-window u72)
+(define-constant standard-rejection-window u144)
 
 (define-data-var admin principal tx-sender)
+(define-data-var total-refunds-issued uint u0)
 
 (define-map VisaApplications
     principal
@@ -23,6 +29,8 @@
         renewals: uint,
         extensions-used: uint,
         last-extension-time: (optional uint),
+        refund-claimed: bool,
+        paid-amount: uint,
     }
 )
 
@@ -109,6 +117,8 @@
             renewals: u0,
             extensions-used: u0,
             last-extension-time: none,
+            refund-claimed: false,
+            paid-amount: visa-fee,
         })
         (ok true)
     )
@@ -379,5 +389,103 @@
     (match (map-get? VisaApplications applicant)
         visa-data (- u3 (get extensions-used visa-data))
         u0
+    )
+)
+
+(define-read-only (calculate-refund-amount (applicant principal))
+    (match (map-get? VisaApplications applicant)
+        visa-data (let (
+                (current-time burn-block-height)
+                (app-time (get application-time visa-data))
+                (time-elapsed (- current-time app-time))
+                (paid (get paid-amount visa-data))
+                (status (get status visa-data))
+                (refund-rate (if (<= time-elapsed early-rejection-window)
+                    refund-rate-early
+                    (if (<= time-elapsed standard-rejection-window)
+                        refund-rate-standard
+                        refund-rate-late
+                    )
+                ))
+            )
+            (if (is-eq status "REJECTED")
+                (/ (* paid refund-rate) u100)
+                u0
+            )
+        )
+        u0
+    )
+)
+
+(define-read-only (is-refund-eligible (applicant principal))
+    (match (map-get? VisaApplications applicant)
+        visa-data (let (
+                (status (get status visa-data))
+                (already-claimed (get refund-claimed visa-data))
+            )
+            (and
+                (is-eq status "REJECTED")
+                (not already-claimed)
+            )
+        )
+        false
+    )
+)
+
+(define-public (claim-refund)
+    (let ((refund-amount (calculate-refund-amount tx-sender)))
+        (asserts! (is-refund-eligible tx-sender) (err u28))
+        (asserts! (> refund-amount u0) (err u29))
+        (try! (as-contract (stx-transfer? refund-amount tx-sender tx-sender)))
+        (match (map-get? VisaApplications tx-sender)
+            visa-data (begin
+                (map-set VisaApplications tx-sender
+                    (merge visa-data { refund-claimed: true })
+                )
+                (var-set total-refunds-issued
+                    (+ (var-get total-refunds-issued) refund-amount)
+                )
+                (ok refund-amount)
+            )
+            (err u30)
+        )
+    )
+)
+
+(define-public (reject-visa-with-reason
+        (applicant principal)
+        (reason (string-ascii 100))
+    )
+    (let ((current-time burn-block-height))
+        (asserts! (is-eq tx-sender (var-get admin)) (err u31))
+        (match (map-get? VisaApplications applicant)
+            visa-data (begin
+                (map-set VisaApplications applicant
+                    (merge visa-data { status: "REJECTED" })
+                )
+                (ok true)
+            )
+            (err u32)
+        )
+    )
+)
+
+(define-read-only (get-total-refunds-issued)
+    (var-get total-refunds-issued)
+)
+
+(define-read-only (get-refund-status (applicant principal))
+    (match (map-get? VisaApplications applicant)
+        visa-data
+        {
+            eligible: (is-refund-eligible applicant),
+            amount: (calculate-refund-amount applicant),
+            claimed: (get refund-claimed visa-data),
+        }
+        {
+            eligible: false,
+            amount: u0,
+            claimed: false,
+        }
     )
 )
