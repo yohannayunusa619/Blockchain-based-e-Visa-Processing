@@ -77,6 +77,39 @@
     (map-get? CountryQuotas country-code)
 )
 
+(define-read-only (get-country-quota-usage (country-code (string-ascii 2)))
+    (match (map-get? CountryQuotas country-code)
+        quota-data (let (
+                (current-time burn-block-height)
+                (daily-limit (get daily-limit quota-data))
+                (stored-count (get current-count quota-data))
+                (last-reset (get last-reset quota-data))
+                (needs-reset (>= (- current-time last-reset) processing-time))
+                (effective-count (if needs-reset
+                    u0
+                    stored-count
+                ))
+                (remaining (if (>= daily-limit effective-count)
+                    (- daily-limit effective-count)
+                    u0
+                ))
+            )
+            {
+                limit: daily-limit,
+                used: effective-count,
+                remaining: remaining,
+                last-reset: last-reset,
+            }
+        )
+        {
+            limit: u0,
+            used: u0,
+            remaining: u0,
+            last-reset: u0,
+        }
+    )
+)
+
 (define-read-only (get-travel-record
         (traveler principal)
         (entry-id uint)
@@ -105,6 +138,30 @@
     (let ((current-time burn-block-height))
         (asserts! (not (check-blacklist tx-sender)) (err u1))
         (asserts! (is-none (get-visa-status tx-sender)) (err u2))
+        (match (map-get? CountryQuotas destination)
+            quota-data (let (
+                    (daily-limit (get daily-limit quota-data))
+                    (stored-count (get current-count quota-data))
+                    (last-reset (get last-reset quota-data))
+                    (needs-reset (>= (- current-time last-reset) processing-time))
+                    (new-count (if needs-reset
+                        u1
+                        (+ stored-count u1)
+                    ))
+                    (new-last-reset (if needs-reset
+                        current-time
+                        last-reset
+                    ))
+                )
+                (asserts! (<= new-count daily-limit) (err u33))
+                (map-set CountryQuotas destination {
+                    daily-limit: daily-limit,
+                    current-count: new-count,
+                    last-reset: new-last-reset,
+                })
+            )
+            true
+        )
         (try! (stx-transfer? visa-fee tx-sender contract-owner))
         (map-set VisaApplications tx-sender {
             status: "PENDING",
